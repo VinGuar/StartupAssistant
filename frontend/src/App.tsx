@@ -15,21 +15,72 @@ interface PlanResponse {
   employee_suggestion: string;
   additional_info?: any;
   chat: ChatMessage[];
+  follow_up_question?: string; // Add this field
 }
+
+// Add a list of all possible extra fields
+const EXTRA_FIELDS = [
+  { key: 'industry', label: 'Industry' },
+  { key: 'team_size', label: 'Team Size' },
+  { key: 'technical_skills', label: 'Technical Skills' },
+  { key: 'monetization', label: 'Monetization Strategy' },
+  { key: 'competition', label: 'Competition' },
+  { key: 'unique_value', label: 'Unique Value Proposition' },
+  { key: 'distribution', label: 'Distribution Channels' },
+  { key: 'marketing', label: 'Marketing Approach' },
+  { key: 'goals', label: 'Goals' },
+  { key: 'challenges', label: 'Challenges' },
+  { key: 'resources', label: 'Resources Available' },
+  { key: 'legal', label: 'Legal/Regulatory' },
+  { key: 'partners', label: 'Potential Partners' },
+  { key: 'scalability', label: 'Scalability' },
+  { key: 'timeline', label: 'Desired Timeline' },
+  { key: 'funding', label: 'Funding Sources' },
+  { key: 'experience', label: 'Relevant Experience' },
+  { key: 'technology', label: 'Technology Stack' },
+  { key: 'other', label: 'Other' },
+];
+
+const BASE_FIELDS = [
+  { key: 'idea', label: 'Startup Idea', placeholder: 'Describe your startup idea...' },
+  { key: 'location', label: 'Location', placeholder: 'Where will your startup operate?' },
+  { key: 'budget', label: 'Budget', placeholder: 'How much money do you have or need?' },
+  { key: 'target', label: 'Target Audience', placeholder: 'Who is your target customer?' },
+  { key: 'time', label: 'Time Available', placeholder: 'How much time can you commit?' },
+];
 
 const App: React.FC = () => {
   const [idea, setIdea] = useState('');
   const [loading, setLoading] = useState(false);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [error, setError] = useState('');
+  const [fields, setFields] = useState<{ [key: string]: string }>(() => BASE_FIELDS.reduce((acc, f) => ({ ...acc, [f.key]: '' }), {}));
+  const [addedFields, setAddedFields] = useState<string[]>([]);
+
+  const handleFieldChange = (key: string, value: string) => {
+    setFields((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleAddField = (key: string) => {
+    setAddedFields((prev) => [...prev, key]);
+    setFields((prev) => ({ ...prev, [key]: '' }));
+  };
+
+  const availableExtraFields = EXTRA_FIELDS.filter(f => !addedFields.includes(f.key) && !BASE_FIELDS.some(bf => bf.key === f.key));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!idea.trim()) return;
-
+    // Only send fields with values
+    const filledFields = Object.fromEntries(Object.entries(fields).filter(([_, v]) => v && v.trim() !== ''));
+    if (!filledFields.idea) return;
     setLoading(true);
     setError('');
-
+    // Build full chat history including the new user message (as a summary of all fields)
+    const userMsg = Object.entries(filledFields).map(([k, v]) => `${k}: ${v}`).join('\n');
+    const newChatHistory = [
+      ...(plan?.chat || []),
+      { role: 'user', content: userMsg }
+    ];
     try {
       const response = await fetch('http://localhost:8000/api/startup', {
         method: 'POST',
@@ -37,17 +88,17 @@ const App: React.FC = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          idea: idea.trim(),
-          history: plan?.chat || []
+          fields: filledFields,
+          history: newChatHistory
         }),
       });
-
       if (!response.ok) {
         throw new Error('Failed to get response from server');
       }
-
       const data = await response.json();
       setPlan(data);
+      setFields(BASE_FIELDS.reduce((acc, f) => ({ ...acc, [f.key]: '' }), {}));
+      setAddedFields([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -78,26 +129,90 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="mb-8">
-          <label htmlFor="idea" className="block text-sm font-medium text-gray-700 mb-2">
-            Describe your startup idea:
-          </label>
-          <textarea
-            id="idea"
-            value={idea}
-            onChange={(e) => setIdea(e.target.value)}
-            placeholder="e.g., I want to build a mobile app that helps people find local farmers markets..."
-            className="w-full h-28 md:h-32 p-3 border-2 border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition outline-none resize-none bg-blue-50 placeholder-gray-400 text-gray-800"
-            disabled={loading}
-          />
-          <button
-            type="submit"
-            disabled={loading || !idea.trim()}
-            className="mt-4 w-full bg-blue-600 text-white font-semibold py-2 rounded-lg shadow hover:bg-blue-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
-          >
-            {loading ? 'Generating Plan...' : 'Get Startup Plan'}
-          </button>
-        </form>
+        {/* If follow_up_question is present, show it and let user answer */}
+        {plan && plan.follow_up_question ? (
+          <form onSubmit={handleSubmit} className="mb-8">
+            <label htmlFor="idea" className="block text-sm font-medium text-gray-700 mb-2">
+              {plan.follow_up_question}
+            </label>
+            <textarea
+              id="idea"
+              value={idea}
+              onChange={(e) => setIdea(e.target.value)}
+              placeholder="Type your answer here..."
+              className="w-full h-28 md:h-32 p-3 border-2 border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition outline-none resize-none bg-blue-50 placeholder-gray-400 text-gray-800"
+              disabled={loading}
+            />
+            <button
+              type="submit"
+              disabled={loading || !idea.trim()}
+              className="mt-4 w-full bg-blue-600 text-white font-semibold py-2 rounded-lg shadow hover:bg-blue-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Sending...' : 'Send'}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleSubmit} className="mb-8">
+            {BASE_FIELDS.map(f => (
+              <div key={f.key} className="mb-4">
+                <label htmlFor={f.key} className="block text-sm font-medium text-gray-700 mb-1">{f.label}</label>
+                <input
+                  id={f.key}
+                  type="text"
+                  value={fields[f.key] || ''}
+                  onChange={e => handleFieldChange(f.key, e.target.value)}
+                  placeholder={f.placeholder}
+                  className="w-full p-2 border-2 border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition outline-none bg-blue-50 placeholder-gray-400 text-gray-800"
+                  disabled={loading}
+                />
+              </div>
+            ))}
+            {addedFields.map(key => {
+              const field = EXTRA_FIELDS.find(f => f.key === key);
+              if (!field) return null;
+              return (
+                <div key={key} className="mb-4">
+                  <label htmlFor={key} className="block text-sm font-medium text-gray-700 mb-1">{field.label}</label>
+                  <input
+                    id={key}
+                    type="text"
+                    value={fields[key] || ''}
+                    onChange={e => handleFieldChange(key, e.target.value)}
+                    placeholder={field.label}
+                    className="w-full p-2 border-2 border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition outline-none bg-blue-50 placeholder-gray-400 text-gray-800"
+                    disabled={loading}
+                  />
+                </div>
+              );
+            })}
+            {availableExtraFields.length > 0 && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Add More Fields</label>
+                <select
+                  className="w-full p-2 border-2 border-blue-200 rounded-lg bg-blue-50 text-gray-800"
+                  onChange={e => {
+                    if (e.target.value) handleAddField(e.target.value);
+                    e.target.value = '';
+                  }}
+                  defaultValue=""
+                  disabled={loading}
+                >
+                  <option value="" disabled>Add a field...</option>
+                  {availableExtraFields.map(f => (
+                    <option key={f.key} value={f.key}>{f.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={loading || !fields.idea.trim()}
+              className="mt-4 w-full bg-blue-600 text-white font-semibold py-2 rounded-lg shadow hover:bg-blue-700 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Generating Plan...' : 'Get Startup Plan'}
+            </button>
+          </form>
+        )}
 
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 mb-4 rounded-lg text-center animate-pulse">
@@ -105,7 +220,8 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {plan && (
+        {/* Only show the plan if there is no follow_up_question */}
+        {plan && !plan.follow_up_question && (
           <div className="mt-6">
             <h2 className="text-xl font-bold text-blue-700 mb-4 text-center">Your Startup Plan</h2>
             <div className="grid md:grid-cols-2 gap-6">

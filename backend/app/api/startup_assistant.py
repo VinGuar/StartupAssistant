@@ -7,6 +7,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.memory import ConversationSummaryMemory
 import numpy as np
+import json
 
 load_dotenv()
 
@@ -18,19 +19,21 @@ class ChatMessage(BaseModel):
     content: str
 
 class StartupRequest(BaseModel):
-    idea: str
+    fields: Optional[Dict[str, str]] = None
     history: Optional[List[ChatMessage]] = None
 
 class PlanResponse(BaseModel):
     tips: List[str]
-    short_term: List[str]
-    medium_term: List[str]
-    long_term: List[str]
     cost_estimate: str
     time_estimate: str
     employee_suggestion: str
+    short_term: List[str]
+    medium_term: List[str]
+    long_term: List[str]
     additional_info: Optional[Dict[str, Any]] = None
     chat: List[ChatMessage]
+    follow_up_question: Optional[str] = None  # New field for follow-up questions
+    plans: Optional[List[Dict[str, Any]]] = None  # New field for multiple plans
 
 # Embedding and vector store setup
 _VECTORSTORE = None
@@ -90,20 +93,45 @@ startup_memory = ConversationSummaryMemory(llm=llm_for_memory)
 # Main endpoint
 @router.post("/startup", response_model=PlanResponse)
 async def startup_assistant(request: StartupRequest):
-    user_message = request.idea
+    fields = request.fields or {}
+    user_message = fields.get('idea', '')
     chat_history = request.history or []
+    # Check if the idea is too vague (e.g., very short or generic)
+    if not user_message or len(user_message.strip()) < 10:
+        follow_up = "Can you provide more details about your startup idea? For example, who is your target audience, what problem are you solving, and what makes your idea unique?"
+        plan = PlanResponse(
+            tips=[],
+            cost_estimate="",
+            time_estimate="",
+            employee_suggestion="",
+            short_term=[],
+            medium_term=[],
+            long_term=[],
+            additional_info={"note": "Please provide more information to get a personalized plan."},
+            chat=chat_history + [ChatMessage(role="assistant", content=follow_up)],
+            follow_up_question=follow_up
+        )
+        return plan
     # Get chat summary
     chat_summary = startup_memory.load_memory_variables({})["history"]
     # Retrieve context
     context = retrieve_context(user_message)
     # Build prompt
+    # Add all fields to the prompt
+    fields_str = "\n".join([f"{k}: {v}" for k, v in fields.items()])
     system_prompt = (
         "You are a world-class startup advisor AI. "
         "You help users turn their ideas into actionable plans, including tips, timelines, cost, team, and more. "
-        "Use the following context if relevant. Be practical, realistic, and encouraging."
+        "Use the following context if relevant. Be practical, realistic, and encouraging. "
+        "If the user's idea is missing key details (such as target audience, problem, or unique value), ask clarifying questions before giving a plan. "
+        "ALWAYS return your response as a JSON object with the following fields: "
+        "plans (list of 2-3 plan objects, each with: tips (list of strings), cost_estimate (string), time_estimate (string), employee_suggestion (string), short_term (list of strings), medium_term (list of strings), long_term (list of strings), additional_info (object, optional)). "
+        "Example: {\"plans\": [{\"tips\": [\"tip1\", \"tip2\"], \"cost_estimate\": \"...\", \"time_estimate\": \"...\", \"employee_suggestion\": \"...\", \"short_term\": [\"...\"], \"medium_term\": [\"...\"], \"long_term\": [\"...\"], \"additional_info\": {\"note\": \"...\"}}, ...]}. "
+        "If you need more information, ask the user specific questions instead of giving a plan."
     )
     user_prompt = f"""
-    Startup Idea: {user_message}
+    Startup Info:
+    {fields_str}
     
     Context:
     {context}
@@ -114,18 +142,64 @@ async def startup_assistant(request: StartupRequest):
     # Get response from LLM (OpenAI or Anthropic)
     llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", openai_api_key=os.getenv("OPENAI_API_KEY"))
     response = llm.invoke(system_prompt + "\n" + user_prompt)
+    response_text = response.content if hasattr(response, "content") else str(response)
+    # Check if the LLM is asking for more info (simple heuristic)
+    follow_up = None
+    if any(q in response_text.lower() for q in ["can you provide", "please specify", "what is your target audience", "what problem are you solving", "could you clarify"]):
+        follow_up = response_text
     # Save to memory
-    startup_memory.save_context({"input": user_prompt}, {"output": response})
-    # Mock plan extraction (replace with actual parsing if needed)
+    startup_memory.save_context({"input": user_prompt}, {"output": response_text})
+    # Try to parse the response as JSON
+    plan_data = None
+    try:
+        plan_data = json.loads(response_text)
+    except Exception:
+        plan_data = None
+    if plan_data and not follow_up:
+        # If multiple plans are present, return them
+        if 'plans' in plan_data and isinstance(plan_data['plans'], list):
+            # Use the first plan for the main fields, but include all in 'plans'
+            first = plan_data['plans'][0] if plan_data['plans'] else {}
+            plan = PlanResponse(
+                tips=first.get("tips", []),
+                cost_estimate=first.get("cost_estimate", ""),
+                time_estimate=first.get("time_estimate", ""),
+                employee_suggestion=first.get("employee_suggestion", ""),
+                short_term=first.get("short_term", []),
+                medium_term=first.get("medium_term", []),
+                long_term=first.get("long_term", []),
+                additional_info=first.get("additional_info", {}),
+                chat=chat_history + [ChatMessage(role="assistant", content=response_text)],
+                follow_up_question=None,
+                plans=plan_data['plans']
+            )
+            return plan
+        # Fallback to single plan if only one
+        plan = PlanResponse(
+            tips=plan_data.get("tips", []),
+            cost_estimate=plan_data.get("cost_estimate", ""),
+            time_estimate=plan_data.get("time_estimate", ""),
+            employee_suggestion=plan_data.get("employee_suggestion", ""),
+            short_term=plan_data.get("short_term", []),
+            medium_term=plan_data.get("medium_term", []),
+            long_term=plan_data.get("long_term", []),
+            additional_info=plan_data.get("additional_info", {}),
+            chat=chat_history + [ChatMessage(role="assistant", content=response_text)],
+            follow_up_question=None,
+            plans=None
+        )
+        return plan
+    # Fallback to mock plan if parsing fails or follow-up is needed
     plan = PlanResponse(
         tips=["Validate your idea with real users.", "Start with a simple MVP."],
-        short_term=["Market research", "Build MVP"],
-        medium_term=["Launch beta", "Gather feedback"],
-        long_term=["Scale operations", "Expand team"],
         cost_estimate="$5,000 - $20,000 for MVP phase",
         time_estimate="3-6 months for MVP",
         employee_suggestion="1-3 people for MVP phase",
+        short_term=["Market research", "Build MVP"],
+        medium_term=["Launch beta", "Gather feedback"],
+        long_term=["Scale operations", "Expand team"],
         additional_info={"note": "This is a mock response. AI integration coming soon."},
-        chat=chat_history + [ChatMessage(role="assistant", content=str(response))]
+        chat=chat_history + [ChatMessage(role="assistant", content=response_text)],
+        follow_up_question=follow_up
     )
     return plan 
